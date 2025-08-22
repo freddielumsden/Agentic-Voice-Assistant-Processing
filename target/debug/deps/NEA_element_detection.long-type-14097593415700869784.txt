@@ -1,0 +1,2 @@
+Result<Infallible, std::io::error::Error>
+Result<Infallible, std::io::Error>
