@@ -1,4 +1,4 @@
-use std::{io::Cursor, path::Ancestors, u8};
+use std::{io::Cursor, path::Ancestors, u8, collections::HashMap};
 use image::{DynamicImage, ImageBuffer, ImageReader, Pixel};
 
 struct activation_stats {
@@ -8,16 +8,20 @@ struct activation_stats {
     avg_activation: f32, // Avg. activation for pixels with activation > 0
 }
 
-fn get_activation(buffer: ImageBuffer<image::Rgb<u8>, Vec<u8>>) -> ImageBuffer<image::Rgb<u8>, Vec<u8>> {
-    // Creates an "activation buffer" which will store the values of
-    // the "activation" - how each pixel compares to its surroundings
-    let mut activation_buffer = image::RgbImage::new(buffer.width(), buffer.height());
-    for (x, y, curr_pixel) in buffer.enumerate_pixels() {
-        let curr_pixel_channels = curr_pixel.channels();
-        let mut total_activation = 0.0;
-        let mut checked_no_pixels: usize = 0;
-        for x_offset  in -1..=1 {
-            for y_offset in -1..=1 {
+const IMMEDIATE_NEIGHBOUR_WEIGHT: f32 = 0.6; // Describes how immediate and unnimedate activation should impact overall
+// activation relative to each other see get_pixel_activation
+
+fn get_pixel_activation(buffer: &ImageBuffer<image::Rgb<u8>, Vec<u8>>, x: u32, y: u32) -> f32 {
+    // Creates a sort of brush, where immediate neighbours have more of an effect
+    // on the activation, and their neighbours have a slight effect.
+    let pixel = buffer.get_pixel(x, y);
+    let pixel_channels = pixel.channels();
+    let mut immediate_activation = 0.0; // Immediate neighbour's total activation
+    let mut unimmediate_activation = 0.0; // All other activation
+    let mut checked_no_immediate: usize = 0;
+    let mut checked_no_unimmediate: usize = 0;
+    for x_offset  in -2..=2 {
+            for y_offset in -2..=2 {
                 if x_offset == 0 && y_offset == 0 {
                     continue
                 }
@@ -32,22 +36,43 @@ fn get_activation(buffer: ImageBuffer<image::Rgb<u8>, Vec<u8>>) -> ImageBuffer<i
                 let offseted_pixel = buffer.get_pixel(offseted_x as u32, offseted_y as u32);
                 let offseted_channels = offseted_pixel.channels();
                 
-                let mut activation: f32 = 0.0;
-                for color in 0..curr_pixel_channels.len() {
-                    activation += 
-                        ((curr_pixel_channels[color] as i32-offseted_channels[color] as i32) as f32).abs()
-                        / curr_pixel_channels.len() as f32; // Adjusts for no. channels
+                let mut difference: f32 = 0.0;
+                for color in 0..pixel_channels.len() {
+                    difference += 
+                        ((pixel_channels[color] as i32-offseted_channels[color] as i32) as f32).abs()
+                        / pixel_channels.len() as f32; // Adjusts for no. channels
                 }
-                total_activation += activation;
-                checked_no_pixels += 1;
+                if x_offset == -2
+                || x_offset == 2
+                || y_offset == -2
+                || y_offset == 2 {
+                    unimmediate_activation += difference;
+                    checked_no_unimmediate += 1;
+                } else {
+                    immediate_activation += difference;
+                    checked_no_immediate += 1;
+                }
             }
         }
-        total_activation /= checked_no_pixels as f32; // Adjusts for no. pixels around curr_pixel (finds avg)
+        immediate_activation /= checked_no_immediate as f32;
+        unimmediate_activation /= checked_no_unimmediate as f32;
+    let activation = immediate_activation * IMMEDIATE_NEIGHBOUR_WEIGHT + unimmediate_activation * (1.0-IMMEDIATE_NEIGHBOUR_WEIGHT); 
+    return activation;
+}
 
-        let activation_pixel = activation_buffer.get_pixel_mut(x, y);
-        *activation_pixel = image::Rgb([total_activation as u8, total_activation as u8, total_activation as u8]);
+fn difference_filter(
+    buffer: &ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+    difference_function: &dyn Fn(&ImageBuffer<image::Rgb<u8>, Vec<u8>>, u32, u32) -> f32
+) -> ImageBuffer<image::Rgb<u8>, Vec<u8>> {
+    // Creates an "activation buffer" which will store the values of
+    // the "activation" - how each pixel compares to its surroundings
+    let mut filter_buffer = image::RgbImage::new(buffer.width(), buffer.height());
+    for (x, y, curr_pixel) in buffer.enumerate_pixels() {
+        let difference = difference_function(&buffer, x, y);
+        let difference_pixel = filter_buffer.get_pixel_mut(x, y);
+        *difference_pixel = image::Rgb([difference as u8, difference as u8, difference as u8]);
     }
-    return activation_buffer
+    return filter_buffer
 }
 
 fn get_activation_stats(buffer: &ImageBuffer<image::Rgb<u8>, Vec<u8>>) -> activation_stats {
@@ -150,7 +175,7 @@ fn get_lines(buffer: &mut ImageBuffer<image::Rgb<u8>, Vec<u8>>, threshold: u8) -
 }
 
 struct line {
-    points: Vec<(u32, u32)>,
+    pixels: Vec<(u32, u32)>,
     top_left: (u32, u32), // Basic quadrilateral
     top_right: (u32, u32),
     bottom_left: (u32, u32),
@@ -160,7 +185,7 @@ struct line {
 
 impl line {
     fn get_activation(&self) -> f32{
-        return self.points.len() as f32 / self.area as f32;
+        return self.pixels.len() as f32 / self.area as f32;
     }
 }
 
@@ -198,7 +223,7 @@ fn get_lines_stats(lines_points: Vec<Vec<(u32, u32)>>) -> Vec<line> {
             * (dy+1);
 
         lines_stats.push(line {
-            points: line_points,
+            pixels: line_points,
             top_left: (leftmost_point.0, top_point.1),
             top_right: (rightmost_point.0, top_point.1),
             bottom_left: (leftmost_point.0, bottom_point.1),
@@ -221,7 +246,7 @@ fn sanitise_lines(lines: Vec<line>) -> Vec<line> {
         let width = line.top_right.0 - line.top_left.0;
         let height = line.top_left.1 - line.bottom_left.1;
         let activation: f32 = line.get_activation();
-        println!("{} {} {} {} {}", width, height, line.area, line.points.len(), activation);
+        println!("{} {} {} {} {}", width, height, line.area, line.pixels.len(), activation);
         if line.area >= AREA_THRESHOLD 
             && std::cmp::max(width, height) >= LARGER_WIDTH_THRESHOLD
             && activation >= ACTIVATION_THRESHOLD {
@@ -231,21 +256,73 @@ fn sanitise_lines(lines: Vec<line>) -> Vec<line> {
     return new_lines
 }
 
-struct text_line {
-    line: line,
-    brush_colour: image::Rgb<u8>,
+struct text_line<'a> {
+    line: &'a line,
+    stroke_color: image::Rgb<u8>,
     text: String
 }
 
+const DIFFERENCE_COLOR_THRESH: f32 = 30.0;
+fn get_line_colors(line: &line, buffer: &ImageBuffer<image::Rgb<u8>, Vec<u8>>)
+    -> HashMap<image::Rgb<u8>, u32> {
+    let mut color_freqs: HashMap<image::Rgb<u8>, u32> = HashMap::new();
+    for pixel in &line.pixels {
+        let pixel = buffer.get_pixel(pixel.0, pixel.1);
+        let curr_color = pixel.channels();
+        let mut match_found = false;
+        for (i, other_color) in color_freqs.keys().enumerate() {
+            let mut difference_squared: f32 = 0.0;
+            for channel in 0..curr_color.len() {
+                difference_squared += 
+                    (curr_color[channel] as i32 - other_color[channel] as i32).pow(2) as f32;
+            }
+            let difference = difference_squared.sqrt();
+            if difference <= DIFFERENCE_COLOR_THRESH {
+                match_found = true;
+                *color_freqs.entry(other_color.clone()).or_insert(0) += 1;
+                break
+            }
+        }
+        if !match_found {
+            color_freqs.insert(image::Rgb::<u8>([curr_color[0], curr_color[1], curr_color[2]]), 1);
+        }
+    }
+    return color_freqs;
+}
+
+fn get_most_common_color(color_freqs: &HashMap<image::Rgb<u8>, u32>) -> image::Rgb<u8> {
+    let mut most_common = image::Rgb::<u8>([0, 0, 0]);
+    let mut highest_freq: u32 = 0;
+    for (color, freq) in color_freqs.iter() {
+        if *freq > highest_freq {
+            most_common = *color;
+            highest_freq = *freq;
+        }
+    }
+    return most_common;
+}
+
 // Returns all lines it suspects to contain text, by examining the original image
-fn find_text_lines(lines: Vec<Vec<(u32, u32)>>, image: ImageBuffer<image::Rgb<u8>, Vec<u8>>) -> Vec<text_line> {
+fn get_text_lines<'a>(lines: &'a Vec<line>, img_buffer: &ImageBuffer<image::Rgb<u8>, Vec<u8>>) -> Vec<text_line<'a>> {
     // List containing all lines which are text
-    let text_lines: Vec<text_line> = Vec::new();
+    // Currently weak
+    // TODO makes this function more accurate
+    let mut text_lines: Vec<text_line> = Vec::new();
 
     for line in lines {
-
+        let color_freqs = get_line_colors(line, img_buffer);
+        if color_freqs.keys().len() == 2 { // If the line only contains 2 colors
+            let stroke_color = get_most_common_color(&color_freqs);
+            text_lines.push(
+                text_line {
+                    line: line,
+                    stroke_color: stroke_color,
+                    text: "".to_string(), 
+                }
+            )
+        }
     }
-    return text_lines
+    text_lines
 }
 
 //fn transcribe_text_lines(lines: Vec<Vec<(u32, u32)>>) -> Vec<Vec<(u32, u32, String)>> {}
@@ -253,12 +330,49 @@ fn find_text_lines(lines: Vec<Vec<(u32, u32)>>, image: ImageBuffer<image::Rgb<u8
 // Takes in a line and creates an image which contains the pixels from that line's bounding box
 // fn line_to_image
 
+fn draw_line(mut buffer: ImageBuffer<image::Rgb<u8>, Vec<u8>>, line: &line)
+    -> ImageBuffer::<image::Rgb<u8>, Vec<u8>> {
+        for point in 0..line.pixels.len() {
+            // println!("{} {}", lines_stats[l].points[point].0, lines_stats[l].points[point].1);
+            let x = line.pixels[point].0;
+            let y = line.pixels[point].1;
+            let pixel = buffer.get_pixel_mut(x, y);
+            *pixel = image::Rgb([255,255,255]);
+        }
+        return buffer
+    }
+
+fn draw_bounding_box(mut buffer: ImageBuffer<image::Rgb<u8>, Vec<u8>>, line: &line) 
+    -> ImageBuffer::<image::Rgb<u8>, Vec<u8>> {
+    for x in line.top_left.0
+        ..=line.top_right.0 {
+        let pixel = buffer.get_pixel_mut(x, line.top_left.1);
+        *pixel = image::Rgb([0,255,0]);
+    }
+    for x in line.bottom_left.0
+        ..=line.bottom_right.0 {
+        let pixel = buffer.get_pixel_mut(x, line.bottom_left.1);
+        *pixel = image::Rgb([0,255,0]);
+    }
+    for y in line.bottom_left.1
+        ..=line.top_left.1 {
+        let pixel = buffer.get_pixel_mut(line.top_left.0, y);
+        *pixel = image::Rgb([0,255,0]);
+    }
+    for y in line.bottom_right.1
+        ..=line.top_right.1 {
+        let pixel = buffer.get_pixel_mut(line.top_right.0, y);
+        *pixel = image::Rgb([0,255,0]);
+    }
+    return buffer
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>>{
     let img_path = "image.png";
     let img = ImageReader::open(img_path)?.decode()?;
     let buffer = DynamicImage::into_rgb8(img);
     
-    let mut activation_buffer = get_activation(buffer);
+    let mut activation_buffer = difference_filter(&buffer, &get_pixel_activation);
     let stats = get_activation_stats(&activation_buffer);
     println!(
         "Max: {} Min: {} Activation count: {} Avg activation: {}",
@@ -267,12 +381,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
         stats.activation_count, 
         stats.avg_activation
     );
-    let line_threshold = 20;
+    let line_threshold = 15;
     let lines = get_lines(&mut activation_buffer, line_threshold);
 
     let lines_stats = get_lines_stats(lines);
     let lines_stats = sanitise_lines(lines_stats);
-
+    let text_lines = get_text_lines(&lines_stats, &buffer);
     /* let slice = &lines_stats[..];
     for line in slice {
         for point1 in 0..line.points.len() {
@@ -285,50 +399,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
         }
         }
     } */
-    let mut total_text_area = 0;
-    let mut total_text_activation = 0;
-    let mut n_text = 0;
+    // let mut total_text_activation: f32 = 0.0;
+    // let mut n_text = 0;
     let mut line_buffer= image::RgbImage::new(activation_buffer.width(), activation_buffer.height());
-    for l in 0..lines_stats.len() {
-        for point in 0..lines_stats[l].points.len() {
-            // println!("{} {}", lines_stats[l].points[point].0, lines_stats[l].points[point].1);
-            let x = lines_stats[l].points[point].0;
-            let y = lines_stats[l].points[point].1;
-            let pixel = line_buffer.get_pixel_mut(x, y);
-            *pixel = image::Rgb([255,255,255]);
-        }
-        for x in lines_stats[l].top_left.0
-            ..=lines_stats[l].top_right.0 {
-            let pixel = line_buffer.get_pixel_mut(x, lines_stats[l].top_left.1);
-            *pixel = image::Rgb([0,255,0]);
-        }
-        for x in lines_stats[l].bottom_left.0
-            ..=lines_stats[l].bottom_right.0 {
-            let pixel = line_buffer.get_pixel_mut(x, lines_stats[l].bottom_left.1);
-            *pixel = image::Rgb([0,255,0]);
-        }
-        for y in lines_stats[l].bottom_left.1
-            ..=lines_stats[l].top_left.1 {
-            let pixel = line_buffer.get_pixel_mut(lines_stats[l].top_left.0, y);
-            *pixel = image::Rgb([0,255,0]);
-        }
-        for y in lines_stats[l].bottom_right.1
-            ..=lines_stats[l].top_right.1 {
-            let pixel = line_buffer.get_pixel_mut(lines_stats[l].top_right.0, y);
-            *pixel = image::Rgb([0,255,0]);
-        }
-        line_buffer.save("line_".to_string() + img_path).unwrap();
-        let mut inp = String::new();
+    for l in 0..text_lines.len() {
+        //if (lines_stats[l].get_activation() - 0.72037894).abs() > 0.1 {
+        //    continue
+        //}
+        line_buffer = draw_line(line_buffer, &text_lines[l].line);
+        line_buffer = draw_bounding_box(line_buffer, &text_lines[l].line);
+        /*let mut inp = String::new();
         std::io::stdin().read_line(&mut inp).unwrap();
-        if (inp == "") {
-            total_text_activation += lines_stats[l].
+        println!("{}", inp[..inp.len()-1].to_string());
+        if inp.trim() == "" {
+            total_text_activation += lines_stats[l].get_activation();
             n_text += 1
-        } else if inp == "exit" {
+        } else if inp.trim() == "exit" {
             break
-        }
+        }*/
     }
     
+    line_buffer.save("line_".to_string() + img_path).unwrap();
     activation_buffer.save("new_".to_string() + img_path).unwrap();
-    println!("Hello, world!");
+    // let avg_activation = total_text_activation/n_text as f32;
+    // println!("{avg_activation}");
     Ok(())
 }
