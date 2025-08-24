@@ -238,7 +238,7 @@ const AREA_THRESHOLD: u32 = 8;
 const LARGER_WIDTH_THRESHOLD: u32 = 8;
 // Minimum activation relative to size
 // Removes empty "box" elements.
-const ACTIVATION_THRESHOLD: f32 = 0.5;
+const ACTIVATION_THRESHOLD: f32 = 0.4;
 
 fn sanitise_lines(lines: Vec<line>) -> Vec<line> {
     let mut new_lines: Vec<line> = Vec::new();
@@ -367,10 +367,29 @@ fn draw_bounding_box(mut buffer: ImageBuffer<image::Rgb<u8>, Vec<u8>>, line: &li
     return buffer
 }
 
+fn get_line_images(lines: &Vec<line>, image_buffer: ImageBuffer<image::Rgb<u8>, Vec<u8>>) -> Vec<ImageBuffer<image::Rgb<u8>, Vec<u8>>> {
+    let mut image_lines: Vec<ImageBuffer<image::Rgb<u8>, Vec<u8>>> = Vec::new();
+    for line in lines {
+        let line_box_width = line.top_right.0 - line.top_left.0;
+        let line_box_height = line.top_left.0 - line.bottom_left.0;
+        let image_line = image::imageops::crop_imm(
+            &image_buffer, 
+            line.top_left.0,
+            line.top_left.1,
+            line_box_width,
+            line_box_height
+        ).to_image();
+        
+        image_lines.push(image_line);
+        
+    }
+    return image_lines;
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>>{
     let img_path = "image.png";
     let img = ImageReader::open(img_path)?.decode()?;
-    let buffer = DynamicImage::into_rgb8(img);
+    let buffer: ImageBuffer<image::Rgb<u8>, Vec<u8>> = DynamicImage::into_rgb8(img);
     
     let mut activation_buffer = difference_filter(&buffer, &get_pixel_activation);
     let stats = get_activation_stats(&activation_buffer);
@@ -386,42 +405,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
 
     let lines_stats = get_lines_stats(lines);
     let lines_stats = sanitise_lines(lines_stats);
-    let text_lines = get_text_lines(&lines_stats, &buffer);
-    /* let slice = &lines_stats[..];
-    for line in slice {
-        for point1 in 0..line.points.len() {
-            for point2 in 0..line.points.len() {
-            if point1==point2 {continue};
-            if line.points[point1].0 == line.points[point2].0
-            && line.points[point1].1 == line.points[point2].1{
-                panic!("OHNOOO")
-            }
-        }
-        }
-    } */
-    // let mut total_text_activation: f32 = 0.0;
-    // let mut n_text = 0;
+
     let mut line_buffer= image::RgbImage::new(activation_buffer.width(), activation_buffer.height());
-    for l in 0..text_lines.len() {
-        //if (lines_stats[l].get_activation() - 0.72037894).abs() > 0.1 {
-        //    continue
-        //}
-        line_buffer = draw_line(line_buffer, &text_lines[l].line);
-        line_buffer = draw_bounding_box(line_buffer, &text_lines[l].line);
-        /*let mut inp = String::new();
-        std::io::stdin().read_line(&mut inp).unwrap();
-        println!("{}", inp[..inp.len()-1].to_string());
-        if inp.trim() == "" {
-            total_text_activation += lines_stats[l].get_activation();
-            n_text += 1
-        } else if inp.trim() == "exit" {
-            break
-        }*/
+    for l in 0..lines_stats.len() {
+        line_buffer = draw_line(line_buffer, &lines_stats[l]);
+        line_buffer = draw_bounding_box(line_buffer, &lines_stats[l]);
     }
     
+    let mut line_images = get_line_images(&lines_stats, buffer);
+
+
     line_buffer.save("line_".to_string() + img_path).unwrap();
-    activation_buffer.save("new_".to_string() + img_path).unwrap();
-    // let avg_activation = total_text_activation/n_text as f32;
-    // println!("{avg_activation}");
     Ok(())
 }
